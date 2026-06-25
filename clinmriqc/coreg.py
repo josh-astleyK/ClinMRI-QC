@@ -25,12 +25,12 @@ legend = {
     }
 
 # load image 
-def load_nifti (path:str) -> np.ndarray: 
+def load_nifti(path: str) -> np.ndarray: 
     img = nibabel.load(path)
-    data = np.asanyarray(img.dataobj, dtype = np.float32)
+    data = np.asanyarray(img.dataobj, dtype=np.float32)
     return data 
 
-def preprocess (ref: np.ndarray, reg: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def preprocess(ref: np.ndarray, reg: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     min_shape = tuple(min(r, g) for r, g in zip(ref.shape, reg.shape))
     slices = tuple(slice(0, s) for s in min_shape)
     ref = ref[slices]
@@ -45,7 +45,7 @@ def preprocess (ref: np.ndarray, reg: np.ndarray) -> Tuple[np.ndarray, np.ndarra
     return _znorm(ref), _znorm(reg)
 
 # metrics 
-def compute_ssim (ref: np.ndarray, reg: np.ndarray) -> float:
+def compute_ssim(ref: np.ndarray, reg: np.ndarray) -> float:
     data_range = float(max(ref.max(), reg.max()) - min(ref.min(), reg.min()))
 
     if data_range < 1e-8:
@@ -77,7 +77,6 @@ def compute_ssim (ref: np.ndarray, reg: np.ndarray) -> float:
         return float(
             structural_similarity(ref, reg, data_range=data_range)
         )
-    
 
 def compute_ncc(ref: np.ndarray, reg: np.ndarray) -> float:
     ref_flat = ref.ravel() - ref.mean()
@@ -89,7 +88,6 @@ def compute_ncc(ref: np.ndarray, reg: np.ndarray) -> float:
 
     return float(np.dot(ref_flat, reg_flat) / denom)
 
-
 # qc criteria 
 def evaluate_flag(results: dict, thresholds: dict) -> str:
     failures = sum(1 for k, v in results.items() if v < thresholds[k])
@@ -98,7 +96,6 @@ def evaluate_flag(results: dict, thresholds: dict) -> str:
     if failures == 1:
         return "YELLOW"
     return "RED"
-
 
 def print_report(ref_path: str, reg_path: str,
                  results: dict, thresholds: dict, flag: str):
@@ -126,30 +123,23 @@ def print_report(ref_path: str, reg_path: str,
         status = status_colour + ("PASS ✔" if passed else "FAIL ✘") + reset
         print(f"  {metric.upper():<10}  {value:>8.4f}  {thr:>10.4f}  {status}")
 
-
     print("-" * width)
     print(f"  Overall QC flag:  {colour}{bold}{flag_symbols[flag]} {flag}{reset} - {legend[flag]}")
     print(bold + "=" * width + reset)
     print()
 
-# main 
+# core functions
 
 def registration_qc(
-    reference_path: str,
-    registered_path: str,
+    ref_arr: np.ndarray,
+    reg_arr: np.ndarray,
+    ref_path: str = "",      
+    reg_path: str = "",
     ssim_threshold: float = THRESHOLDS["ssim"],
     ncc_threshold:  float = THRESHOLDS["ncc"],
     verbose: bool = True,
 ) -> dict:
     thresholds = {"ssim": ssim_threshold, "ncc": ncc_threshold}
-
-    if verbose:
-        print("> Loading reference image …")
-    ref_arr = load_nifti(reference_path)
-
-    if verbose:
-        print("> Loading registered image …")
-    reg_arr = load_nifti(registered_path)
 
     if verbose:
         print(f"> Reference shape : {ref_arr.shape}")
@@ -159,20 +149,17 @@ def registration_qc(
     ref_arr, reg_arr = preprocess(ref_arr, reg_arr)
 
     if verbose:
-        print("> Computing SSIM …")
+        print("> Computing metrics …")
+
     ssim_val = compute_ssim(ref_arr, reg_arr)
-
-    if verbose:
-        print("> Computing NCC …")
-    ncc_val = compute_ncc(ref_arr, reg_arr)
-
+    ncc_val  = compute_ncc(ref_arr, reg_arr)
 
     results = {"ssim": ssim_val, "ncc": ncc_val}
     flag    = evaluate_flag(results, thresholds)
     passed  = {k: v >= thresholds[k] for k, v in results.items()}
 
     if verbose:
-        print_report(reference_path, registered_path, results, thresholds, flag)
+        print_report(ref_path, reg_path, results, thresholds, flag)
 
     return {**results, "flag": flag, "passed": passed}
 
@@ -181,7 +168,6 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Brain MRI Registration QC (SSIM · NCC)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
     )
     parser.add_argument("-ref", "--reference",  required=True,
                         help="Path to reference image")
@@ -198,18 +184,26 @@ def parse_args():
 
 def main():
     args = parse_args()
-    
-    # validate paths
+
+   
     for label, path in [("Reference", args.reference), ("Registered", args.registered)]:
         if not os.path.exists(path):
             sys.exit(f"[ERROR] {label} path does not exist: {path}")
 
+    print("> Loading reference image …")
+    ref_arr = load_nifti(args.reference)
+
+    print("> Loading registered image …")
+    reg_arr = load_nifti(args.registered)
+
     result = registration_qc(
-        reference_path  = args.reference,
-        registered_path = args.registered,
-        ssim_threshold  = args.ssim_threshold,
-        ncc_threshold   = args.ncc_threshold,
-        verbose         = not args.quiet,
+        ref_arr        = ref_arr,
+        reg_arr        = reg_arr,
+        ref_path       = args.reference,
+        reg_path       = args.registered,
+        ssim_threshold = args.ssim_threshold,
+        ncc_threshold  = args.ncc_threshold,
+        verbose        = not args.quiet,
     )
 
     if args.quiet:
@@ -221,4 +215,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

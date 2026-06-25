@@ -13,3 +13,5 @@ env/
 *.nii.gz
 *.mgz
 data/
+!data/test_images/
+!data/test_images/*.nii.gz
