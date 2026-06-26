@@ -623,7 +623,7 @@ def check_mask(
     checks: Dict[str, dict] = {}
     stats: Dict[str, object] = {}
     try:
-        data = np.asarray(load_nifti(mask_path), dtype=np.float32)
+        data = np.asarray(load_nifti(mask_path)[0], dtype=np.float32)
         if data.ndim > 3:
             data = data[..., 0]
     except Exception as exc:
@@ -717,11 +717,11 @@ def run_qc(
     feature_qc: dict = {}
     features: dict = {}
     try:
-        image = load_nifti(image_path)
+        image, _ = load_nifti(image_path)
         affine = np.asarray(nibabel.load(image_path).affine, dtype=float)
         mask = None
         if brain_mask_path:
-            mask = load_nifti(brain_mask_path).astype(bool)
+            mask, _ = load_nifti(brain_mask_path).astype(bool)
         features = compute_features(image, brain_mask=mask, affine=affine)
         feature_qc = check_features(features, thresholds)
     except Exception as exc:

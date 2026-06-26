@@ -187,10 +187,10 @@ def main():
             sys.exit(f"[ERROR] {label} path does not exist: {path}")
 
     print("> Loading reference image …")
-    ref_arr = load_nifti(args.reference)
+    ref_arr, _= load_nifti(args.reference)
 
     print("> Loading registered image …")
-    reg_arr = load_nifti(args.registered)
+    reg_arr, _= load_nifti(args.registered)
 
     # get brain mask 
     print("> Generating brain mask from reference image …")

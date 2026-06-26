@@ -99,8 +99,8 @@ def main():
     args = parser.parse_args()
     
     # load nifti file
-    image_arr = load_nifti(args.image)
-    mask_arr = load_nifti(args.brain_mask).astype(bool)
+    image_arr, _= load_nifti(args.image)
+    mask_arr, _= load_nifti(args.brain_mask).astype(bool)
 
     results = detect_contrast_enhancement(image_arr, mask_arr)
     output = json.dumps(results, indent=2)

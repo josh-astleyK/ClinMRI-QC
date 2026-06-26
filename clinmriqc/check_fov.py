@@ -3,7 +3,7 @@ import numpy as np
 from scipy.ndimage import binary_erosion, binary_fill_holes
 from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import binary_fill_holes
-
+from clinmriqc.general import load_nifti
 
 
 def check_fov(input_scan: str, brain_mask: str, margin_threshold: int = 5) -> dict:
@@ -24,27 +24,16 @@ def check_fov(input_scan: str, brain_mask: str, margin_threshold: int = 5) -> di
     """
     # print(f"Checking FOV for scan: {input_scan}")
     # get brain mask
-    img_mask = nib.load(brain_mask)
-    img_mask = nib.as_closest_canonical(img_mask)  # force RAS orientation
-    data_mask = img_mask.get_fdata()
-    
+    data_mask, _= load_nifti(brain_mask)
     mask = data_mask > 0
 
 
     # get scan signal (non-zero voxels)
-    img_scan = nib.load(input_scan)
-    img_scan = nib.as_closest_canonical(img_scan)  # force RAS orientation
-    data_scan = img_scan.get_fdata()
+    data_scan, img_scan = load_nifti(input_scan)
     scan_signal = data_scan > 0
 
     # fill holes in scan signal
     scan_signal = binary_fill_holes(scan_signal)
-
-
-    # TEST: save scan signal as a mask for visualisation
-    #scan_signal_img = nib.Nifti1Image(scan_signal.astype(np.uint8), img_scan.affine, img_scan.header)
-    #nib.save(scan_signal_img, 'TEST_scan_signal_mask.nii.gz')
-
 
     coords_scan = np.where(scan_signal)
     scan_min_x, scan_max_x = coords_scan[0].min(), coords_scan[0].max()
@@ -64,9 +53,6 @@ def check_fov(input_scan: str, brain_mask: str, margin_threshold: int = 5) -> di
     if not cutoff_axes:
         cutoff_axes.append('Passed')
         check_passes +=1
-
-
-
 
     # check 2: if the brain mask is within a certain margin of the edge of the max/min scan signal (default=5 voxels)
     cutoff_axes_2 = []
@@ -100,8 +86,6 @@ def check_fov(input_scan: str, brain_mask: str, margin_threshold: int = 5) -> di
         cutoff_axes_2.append('Passed')
         check_passes +=1
 
-
-
     # check 3: calculate the distance transform of the scan signal and find the minimum distance to the mask
     distance_check = []
     scan_distance = distance_transform_edt(scan_signal) # this finds the distance of each voxel in scan signal to the edge of scan signal
@@ -111,11 +95,6 @@ def check_fov(input_scan: str, brain_mask: str, margin_threshold: int = 5) -> di
 
     # minimum distance between mask and scan signal boundary 
     min_distance = mask_distances.min()
-    # print(f"minimum distance between mask and scan edge: {min_distance} voxels")
-
-    # are there zero voxels inside the mask?
-    holes = mask & ~scan_signal
-    # print(f"holes inside mask: {np.sum(holes)}")
 
     if min_distance < 1:
         distance_check.append('Failed')
@@ -123,11 +102,7 @@ def check_fov(input_scan: str, brain_mask: str, margin_threshold: int = 5) -> di
         distance_check.append('Passed')
         check_passes +=1
 
-
-
     # calculate overall p/f
-
-
     overall = "Passed" if check_passes >= 2 else "Failed"
     
 

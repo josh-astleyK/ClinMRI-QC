@@ -175,9 +175,9 @@ def main():
         'zipper':     args.threshold_zipper,
     }.items() if v is not None}
 
-    image_arr = load_nifti(args.image)
+    image_arr, _ = load_nifti(args.image)
     if args.brain_mask:
-        mask_arr = load_nifti(args.brain_mask).astype(bool)
+        mask_arr, _ = load_nifti(args.brain_mask).astype(bool)
     else:
         try:
             print("No brain mask supplied — generating via brainchop...")

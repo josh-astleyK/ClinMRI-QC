@@ -24,8 +24,9 @@ def load_config(path: str | Path | None = None) -> dict:
 
 def load_nifti (path:str) -> np.ndarray: 
     img = nibabel.load(path)
+    img = nibabel.as_closest_canonical(img)  # force RAS orientation
     data = np.asanyarray(img.dataobj, dtype = np.float32)
-    return data 
+    return data, img
 
 
 import nibabel as nib
@@ -43,7 +44,7 @@ def get_brain_mask(path: str, outfile=None) -> np.ndarray:
     
     _save_inverse_conform(brain_mask, path, outfile.name)
     
-    mask = load_nifti(outfile.name)
+    mask, _ = load_nifti(outfile.name)
 
     return (mask>0).astype(bool)
 
