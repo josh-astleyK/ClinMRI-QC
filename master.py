@@ -61,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from clinmriqc.general          import load_nifti, get_brain_mask, load_config
 from clinmriqc.artifacts        import detect_artifacts
 from clinmriqc.contrast         import detect_contrast_enhancement
+from clinmriqc                  import metaqc
 from clinmriqc.generate_csv     import build_qc_record
 from clinmriqc.append_csv       import append_csv_record
 from clinmriqc.generate_report  import generate_html_from_csv
@@ -95,7 +96,7 @@ def process_scan(img_path: Path, device: str, cfg: dict) -> tuple:
         cfg: Config dict loaded from default.json (or a custom override).
 
     Returns:
-        (artifacts_result, contrast_result)
+        (artifacts_result, contrast_result, metaqc_result)
     """
     image = load_nifti(str(img_path))
 
@@ -128,7 +129,14 @@ def process_scan(img_path: Path, device: str, cfg: dict) -> tuple:
         bright_fraction_threshold=con_cfg["bright_fraction_threshold"],
     )
 
-    return art, con
+    # Metadata + per-sample feature QC. Reuses the already-loaded image and the
+    # brain mask computed above, so the volume is not read from disk again.
+    meta_cfg = cfg.get("check_metadata", {})
+    meta = metaqc.run_qc_arrays(
+        str(img_path), image, brain_mask=brain_mask, thresholds=meta_cfg,
+    )
+
+    return art, con, meta
 
 
 # ---------------------------------------------------------------------------
@@ -182,13 +190,14 @@ def run(
 
         t0 = time.time()
         try:
-            art, con = process_scan(img_path, device, cfg)
+            art, con, meta = process_scan(img_path, device, cfg)
 
             record = build_qc_record(
                 image_path=img_path,
                 patient_id=patient_id,
                 artifacts=art,
                 contrast=con,
+                meta=meta,
             )
             append_csv_record(record, str(csv_path))
 
