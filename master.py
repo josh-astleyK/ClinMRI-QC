@@ -67,7 +67,7 @@ from clinmriqc.generate_csv     import build_qc_record
 from clinmriqc.append_csv       import append_csv_record
 from clinmriqc.generate_report  import generate_html_from_csv
 from clinmriqc.classifier.model import load_regression_model
-
+from clinmriqc.check_fov        import check_fov
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,7 +88,7 @@ def _already_processed(csv_path: Path) -> set:
 # Per-scan pipeline
 # ---------------------------------------------------------------------------
 
-def process_scan(img_path: Path, device: str, cfg: dict) -> tuple:
+def process_scan(img_path: Path, device: str, cfg: dict, ref_path: Path, mask_path: Path) -> tuple:
     """Run the full QC pipeline for one scan.
 
     Args:
@@ -99,11 +99,18 @@ def process_scan(img_path: Path, device: str, cfg: dict) -> tuple:
     Returns:
         (artifacts_result, contrast_result, metaqc_result)
     """
-    image = load_nifti(str(img_path))
+    image, _ = load_nifti(str(img_path))
 
     # Skull-strip via brainchop. get_brain_mask uses _save_inverse_conform so
     # the returned mask is already at native image resolution.
-    brain_mask = get_brain_mask(str(img_path))
+    if not mask_path is None:
+        brain_mask, _= load_nifti(str(mask_path))
+        if brain_mask.shape != image.shape:
+            print(f'Error with the brain mask provided {mask_path}. Different dimension than image {img_path}')
+            print(f'Creating brain mask from image...')
+            brain_mask  = get_brain_mask(str(img_path))
+    else:
+        brain_mask  = get_brain_mask(str(img_path))
     
     # Empty mask (unusual acquisitions) — fall back to None so each downstream
     # function uses its own internal masking strategy.
@@ -150,8 +157,14 @@ def process_scan(img_path: Path, device: str, cfg: dict) -> tuple:
             reg_path = str(img_path),
             verbose  = True,
         )
-
     
+    # check fov
+    con_cfg = cfg["check_fov"]
+    fov = check_fov(
+        image,
+        brain_mask,
+        margin_threshold=con_cfg["margin_threshold"],
+    )
 
     # Metadata + per-sample feature QC. Reuses the already-loaded image and the
     # brain mask computed above, so the volume is not read from disk again.
@@ -160,7 +173,7 @@ def process_scan(img_path: Path, device: str, cfg: dict) -> tuple:
         str(img_path), image, brain_mask=brain_mask, thresholds=meta_cfg,
     )
 
-    return art, con, coreg, meta
+    return art, con, coreg, meta, fov
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +230,7 @@ def run(
 
         t0 = time.time()
         try:
-            art, con, coreg, meta = process_scan(img_path, device, cfg,ref_path=ref_path)
+            art, con, coreg, meta, fov= process_scan(img_path, device, cfg,ref_path=ref_path)
 
             record = build_qc_record(
                 image_path=img_path,
