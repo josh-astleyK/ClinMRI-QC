@@ -1,0 +1,41 @@
+Synthetic QC samples - ground-truth descriptions
+==================================================
+
+Sample 1 - uniform cube.
+  Volume: 40x40x40 = 64000 voxels, all zero except a 20x20x20 cube
+          (indices 10:30 on each axis) = 8000 voxels set to 100.
+  Brain mask: exactly that cube (8000 voxels = 1).
+  GROUND TRUTH (stats over the mask):
+    intensity_mean = 100 (every masked voxel is 100)
+    intensity_std  = 0   (uniform)
+    foreground_fraction = 8000/64000 = 0.125
+    centroid_offset ~ 0  (cube is centred in the volume)
+
+Sample 2 - two-valued region (the key test for the mask confusion).
+  Volume: 40x40x40. Inside the 20x20x20 mask, half the slices = 50,
+          the other half = 150. Outside the mask = 0.
+  GROUND TRUTH (stats over the mask, of the IMAGE not the mask):
+    intensity_mean = (50+150)/2 = 100   <-- NOT 1 (the mask value)
+    intensity_std  = 50   (each half is 50 away from the mean)
+    centroid_offset ~ 2.5 mm  (the brighter 150 half pulls the
+          intensity-weighted centre of mass toward it -- so the
+          centroid is NOT the geometric centre; this is expected.)
+
+Sample 3 - anisotropic voxel spacing (metadata QC).
+  Volume: 20x20x20, voxel spacing set to 0.8 x 0.8 x 3.0 mm.
+  GROUND TRUTH:
+    voxel_spacing = [0.8, 0.8, 3.0]
+    anisotropy ratio = 3.0/0.8 = 3.75 (< default 8 -> passes)
+
+Sample 4 - nearly-empty volume (foreground-threshold test).
+  Volume: 40x40x40, only a 5x5x5 corner (125 voxels) set to 100.
+  GROUND TRUTH:
+    foreground_fraction = 125/64000 = 0.00195
+    foreground check FAILS at default 0.05 floor (volume too empty).
+
+Sample 5 - off-centre blob (centroid test).
+  Volume: 40x40x40, a 10x10x10 cube at indices 2:12 (near a corner).
+  GROUND TRUTH:
+    intensity_mean = 100, std = 0 (uniform blob)
+    centroid_offset LARGE (~22 mm): blob is far from the volume centre.
+
