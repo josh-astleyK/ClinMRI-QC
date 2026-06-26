@@ -765,6 +765,46 @@ def run_qc(
     }
 
 
+def run_qc_arrays(
+    image_path: str,
+    image: "np.ndarray",
+    brain_mask: Optional["np.ndarray"] = None,
+    thresholds: Optional[dict] = None,
+) -> dict:
+    """Per-sample QC when the image (and mask) are already loaded in memory.
+
+    Same result shape as run_qc, but reuses arrays the caller already has
+    instead of reading the volume from disk again. Header QC still uses the
+    path (it reads only the header). Intended for master.py, where the pipeline
+    has already loaded the image and computed a brain mask array.
+
+    image      : the loaded image array.
+    brain_mask : optional boolean array on the image grid; if given, intensity
+                 stats are restricted to it.
+    """
+    meta_qc = check_metadata(image_path, thresholds)
+    try:
+        affine = np.asarray(nibabel.load(image_path).affine, dtype=float)
+    except Exception:
+        affine = None
+    mask = None if brain_mask is None else np.asarray(brain_mask).astype(bool)
+    features = compute_features(image, brain_mask=mask, affine=affine)
+    feature_qc = check_features(features, thresholds)
+
+    statuses = [meta_qc.get("status", "fail"), feature_qc.get("status", "fail")]
+    meta_reasons = meta_qc.get("reasons") or _reasons(meta_qc.get("checks", {}))
+    reasons = [f"metadata.{r}" for r in meta_reasons] \
+        + [f"feature.{r}" for r in feature_qc.get("reasons", [])]
+    return {
+        "image": image_path,
+        "status": _worst(statuses),
+        "reasons": reasons,
+        "metadata_qc": meta_qc,
+        "feature_qc": feature_qc,
+        "features": features,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
