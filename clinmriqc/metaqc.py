@@ -1,61 +1,61 @@
-"""Metadata and per-sample image-feature QC for clinical MRI.
+"""Metadata and per-sample image feature QC for clinical MRI.
 
-Part of ClinMRI-QC. One flat module, matching the per-member layout
-(artifacts.py, coreg.py, contrast.py). Per-sample only: each function takes one
-image (optionally a brain mask) and returns a dict of named numbers plus
-pass/warning/fail flags. No cohort or cross-subject logic lives here.
+This is the metadata/feature QC contribution to ClinMRI-QC, written as a single
+flat module to match the team's per-member layout (cf. ``artifacts.py``,
+``coreg.py``, ``contrast.py``). It is **per-sample only**: every function takes a
+single image (and optionally a brain mask) and returns a plain dict of named,
+documented numbers plus pass/warning/fail flags. There is no cohort/cross-subject
+logic here -- that is deliberately out of scope for the team submission.
 
-How to use
-----------
-    from clinmriqc import metaqc
+Two kinds of QC are provided:
 
-    # One image, no mask.
-    metaqc.run_qc("study1_T1W.nii.gz")
+1. **Header/metadata QC** (``check_metadata``), reads only the NIfTI
+   header: shape, voxel spacing, affine validity, orientation. Answers "is this
+   file geometrically valid and plausible?"
 
-    # One image with a brain mask (intensity stats restricted to the brain).
-    metaqc.run_qc("study1_T1W.nii.gz", brain_mask_path="brainmask.nii.gz")
+2. **Per-sample image-feature QC** (``compute_features`` + ``check_features``) 
+   reads voxels: foreground fraction, intensity statistics, centroid offset.
+   Answers "are the voxel contents plausible (not empty, not constant, brain
+   roughly centred)?"
 
-    # One image with brain and lesion masks (each mask QC'd separately).
-    metaqc.run_qc("T1WKS.nii.gz",
-                  brain_mask_path="brainmask.nii.gz",
-                  lesion_mask_path="gt.nii.gz")
+WHAT EACH NUMBER MEANS (the team asked for this to be explicit)
+---------------------------------------------------------------
+All intensity statistics are computed over a **foreground voxel set**, never the
+whole volume, because MRI background is a large near-zero region that would
+dominate any whole volume statistic. How the foreground is chosen depends on
+what you pass:
 
-    # Are a subject's expected modalities/masks/timepoints present?
-    files = glob.glob("patient01/*.nii.gz")
-    metaqc.check_completeness(files, {"required_modalities": ["T1w", "FLAIR"]})
+* If you pass a ``brain_mask``: foreground = voxels inside the brain mask, and
+  intensity stats are of the **underlying image** within that mask. This is the
+  correct, trustworthy option for brain MRI.
+* If you pass no mask: foreground is estimated as voxels above a low percentile
+  (default 10th) of the volume's own intensity range. The method used is returned
+  in ``foreground_method`` so the number is auditable.
 
-    # Command line (single image):
-    #   python -m clinmriqc.metaqc --image T1W.nii.gz --brain_mask brainmask.nii.gz
+So ``intensity_mean`` is the mean intensity of the *image* over the foreground
+voxels. It is NOT the mean of mask values -- a binary mask is all 1s, so its
+mean would be a meaningless 1.0. (That earlier confusion is why this module
+requires the image separately from the mask: you always get image statistics,
+restricted to the mask region, never statistics of the mask itself.)
 
-What the numbers mean
----------------------
-Intensity statistics are computed over a foreground voxel set, not the whole
-volume, because the MRI background is a large near-zero region that would skew
-any whole-volume statistic.
+``foreground_fraction`` = (foreground voxel count) / (total voxel count): the
+proportion of the volume that is signal rather than background. A tiny value
+(e.g. < 0.05) usually means a nearly-empty volume or a failed acquisition.
 
-  foreground:   with a brain_mask, foreground is the voxels inside it, and the
-                stats are of the image within that mask. With no mask, foreground
-                is voxels above the 10th percentile of the volume's own range.
-                foreground_method records which rule was used.
-  intensity_*:  statistics of the IMAGE over the foreground. These are image
-                intensities, never the mask's own label values (a binary mask is
-                all 1s, so its mean would just be 1.0). That is why the image and
-                mask are passed separately.
-  foreground_fraction: foreground voxels / total voxels. A small value (under
-                ~0.05) usually means a near-empty or failed volume.
-  centroid_offset_mm: distance from the intensity-weighted centre of the
-                foreground to the geometric centre. A soft descriptor, not a hard
-                verdict; a large value can indicate an off-centre or cropped brain.
+``centroid_offset_mm`` = distance, in millimetres, between the
+intensity-weighted centre of the foreground and the geometric centre of the
+volume. Large offsets can indicate the brain is far off-centre (cropping,
+mispositioning). It is a soft descriptor, not a hard verdict.
 
-Thresholds and config
-----------------------
-check_features takes a thresholds dict; defaults are in DEFAULT_THRESHOLDS.
-Completeness and role detection take a config dict (DEFAULT_CONFIG) so the tool
-works on datasets with different modality naming, mask roles, or timepoint
-schemes. Pass overrides for any subset; everything is optional.
+CONFIGURABLE THRESHOLDS
+-----------------------
+``check_features`` takes a ``thresholds`` dict so callers decide what counts as
+a problem, e.g. ``{"min_foreground_fraction": 0.10}`` flags any volume whose
+foreground is under 10%. Defaults are in ``DEFAULT_THRESHOLDS``; pass overrides
+for any subset.
 
-Every check returns {status, message} with status in {pass, warning, fail}, so
-results compose into a merged report.
+Every check returns a dict with ``status`` in {"pass","warning","fail"} and a
+human-readable ``message``, so results compose into the team's merged report.
 """
 
 from __future__ import annotations
@@ -91,223 +91,6 @@ DEFAULT_THRESHOLDS: Dict[str, float] = {
 }
 
 _FOREGROUND_PERCENTILE = 10.0  # background-removal percentile when no mask given
-
-
-# --------------------------------------------------------------------------- #
-# Dataset configuration (user-defined, structure-agnostic)
-# --------------------------------------------------------------------------- #
-# The user declares what to expect; nothing is hard-coded to one dataset. Example:
-#
-#   config = {
-#       "modalities": {                       # role -> filename patterns (any match)
-#           "T1w":   ["t1w", "t1.nii", "_t1"],
-#           "FLAIR": ["flair"],
-#           "T1CE":  ["t1wks", "t1ce", "post"],
-#           "T2w":   ["t2w", "t2."],
-#       },
-#       "masks": {                            # mask role -> patterns; any roles allowed
-#           "brain":  ["brainmask", "brain_mask"],
-#           "lesion": ["consensus", "lesion", "_gt"],
-#       },
-#       "required_modalities": ["T1w", "FLAIR"],   # subset that MUST be present
-#       "required_masks": [],                       # mask roles that MUST be present
-#       "timepoint_patterns": ["ses-", "study", "tp", "week", "month"],  # longitudinal
-#       "expected_timepoints": None,           # int, or None to not enforce a count
-#   }
-#
-# All fields optional; defaults below cover the common brain-MRI case.
-DEFAULT_CONFIG: dict = {
-    "modalities": {
-        "T1w":   ["t1w", "t1.nii", "_t1.", "t1_"],
-        "FLAIR": ["flair"],
-        "T1CE":  ["t1wks", "t1ce", "t1post", "t1_post", "_post", "postgad", "gad", "ce.nii"],
-        "T2w":   ["t2w", "t2.nii", "_t2.", "t2_"],
-        "PD":    ["pd.nii", "_pd", "proton"],
-        "DWI":   ["dwi", "diffusion"],
-    },
-    "masks": {
-        "brain":  ["brainmask", "brain_mask", "brain-mask"],
-        "lesion": ["consensus", "lesion", "_gt", "gt.nii", "ground_truth", "seg"],
-    },
-    "required_modalities": [],   # empty = report presence but never fail on absence
-    "required_masks": [],
-    "timepoint_patterns": ["ses-", "study", "_tp", "week", "month", "visit", "baseline", "followup"],
-    "expected_timepoints": None,
-}
-
-
-def classify_file(filename: str, config: Optional[dict] = None) -> Tuple[str, Optional[str]]:
-    """Classify a filename into (kind, role) using the config's patterns.
-
-    kind is "modality", "mask", or "unknown"; role is the matched role name
-    (e.g. "T1w", "brain") or None. Masks are checked before modalities so a
-    'brainmask' is not mis-read as a T1.
-
-    Modality matching is specificity-ordered: more specific roles (e.g. T1CE,
-    whose patterns like 't1wks'/'t1ce' CONTAIN the generic 't1') are tested
-    before generic ones (T1w), so 'T1WKS.nii.gz' is correctly read as T1CE, not
-    T1w. Within the configured modalities, roles are tried in order of their
-    longest matching pattern (longer = more specific) to avoid a short generic
-    substring claiming a more specific filename.
-    """
-    cfg = {**DEFAULT_CONFIG, **(config or {})}
-    name = os.path.basename(filename).lower()
-
-    # Masks first (a brain mask must not be read as an image).
-    for role, patterns in cfg.get("masks", {}).items():
-        if any(p in name for p in patterns):
-            return "mask", role
-
-    # Modalities, specificity-ordered: for each role, find its longest pattern
-    # that matches; then pick the role whose matched pattern is longest. This
-    # makes 't1wks' (T1CE) beat 't1w' (T1w) on a 'T1WKS' filename.
-    best_role = None
-    best_len = -1
-    for role, patterns in cfg.get("modalities", {}).items():
-        matched = [p for p in patterns if p in name]
-        if matched:
-            longest = max(len(p) for p in matched)
-            if longest > best_len:
-                best_len = longest
-                best_role = role
-    if best_role is not None:
-        return "modality", best_role
-    return "unknown", None
-
-
-def detect_timepoint(path: str, config: Optional[dict] = None) -> Optional[str]:
-    """Timepoint label from a path, or None if no longitudinal pattern is found.
-
-    Timepoints may be a folder (``.../ses-01/...``) or a token inside the
-    filename (``study1_FLAIR.nii.gz``). For each configured pattern, return the
-    token it belongs to: the pattern plus any trailing digits, so
-    ``study1_FLAIR`` gives ``study1``, not the whole filename.
-    """
-    import re
-    cfg = {**DEFAULT_CONFIG, **(config or {})}
-    low = path.replace("\\", "/").lower()
-    for pat in cfg.get("timepoint_patterns", []):
-        idx = low.find(pat)
-        if idx >= 0:
-            # Capture the pattern plus trailing digits (study1, ses-01, week2...).
-            m = re.match(rf"{re.escape(pat)}[-_]?\d*", low[idx:])
-            token = m.group(0) if m else pat
-            # Normalise: strip a trailing separator if no digits followed.
-            return token.rstrip("-_")
-    return None
-
-
-def check_completeness(
-    files: List[str],
-    config: Optional[dict] = None,
-) -> dict:
-    """Check whether a subject's expected modalities/masks/timepoints are present.
-
-    Parameters
-    ----------
-    files : list of file paths belonging to ONE subject (any structure).
-    config : the expectation config (see DEFAULT_CONFIG). The relevant keys are
-        required_modalities, required_masks, timepoint_patterns,
-        expected_timepoints.
-
-    Returns
-    -------
-    dict with {status, checks, reasons} plus:
-        present_modalities, present_masks, timepoints (sorted lists),
-        missing_modalities, missing_masks.
-
-    Works for any scale:
-      * one file        -> reports that single modality; "completeness" of a
-                           one-image input passes unless required items are set.
-      * one subject     -> checks all required modalities/masks are present.
-      * longitudinal    -> groups files by detected timepoint and (if
-                           expected_timepoints is set) checks the count.
-    """
-    cfg = {**DEFAULT_CONFIG, **(config or {})}
-    checks: Dict[str, dict] = {}
-
-    present_modalities, present_masks, timepoints = set(), set(), set()
-    # Track which modalities appear in each detected timepoint, so longitudinal
-    # completeness can require every timepoint to have the full set.
-    by_timepoint: Dict[str, set] = {}
-    for f in files:
-        kind, role = classify_file(f, cfg)
-        tp = detect_timepoint(f, cfg)
-        if kind == "modality":
-            present_modalities.add(role)
-            if tp:
-                by_timepoint.setdefault(tp, set()).add(role)
-        elif kind == "mask":
-            present_masks.add(role)
-        if tp:
-            timepoints.add(tp)
-
-    # Modality completeness.
-    req_mod = list(cfg.get("required_modalities", []))
-    missing_mod = [m for m in req_mod if m not in present_modalities]
-    if not req_mod:
-        checks["modalities"] = {"status": "pass",
-                                "message": f"Present: {sorted(present_modalities) or 'none'} "
-                                           "(no required set; presence only)."}
-    elif missing_mod:
-        checks["modalities"] = {"status": "fail",
-                                "message": f"Missing required modalities: {missing_mod} "
-                                           f"(present: {sorted(present_modalities)})."}
-    else:
-        checks["modalities"] = {"status": "pass",
-                                "message": f"All required modalities present: {req_mod}."}
-
-    # Mask completeness.
-    req_mask = list(cfg.get("required_masks", []))
-    missing_mask = [m for m in req_mask if m not in present_masks]
-    if not req_mask:
-        checks["masks"] = {"status": "pass",
-                           "message": f"Masks present: {sorted(present_masks) or 'none'} "
-                                      "(no required set)."}
-    elif missing_mask:
-        checks["masks"] = {"status": "fail",
-                           "message": f"Missing required masks: {missing_mask} "
-                                      f"(present: {sorted(present_masks)})."}
-    else:
-        checks["masks"] = {"status": "pass",
-                           "message": f"All required masks present: {req_mask}."}
-
-    # Longitudinal completeness.
-    exp_tp = cfg.get("expected_timepoints")
-    if exp_tp is not None or timepoints:
-        n = len(timepoints)
-        # Count check (only when an expected number is configured).
-        count_ok = (exp_tp is None) or (n >= exp_tp)
-        # Per-timepoint modality completeness: each timepoint should carry the
-        # full required set (a timepoint missing a modality is incomplete).
-        per_tp_missing = {}
-        if req_mod:
-            for tp in sorted(timepoints):
-                miss = [m for m in req_mod if m not in by_timepoint.get(tp, set())]
-                if miss:
-                    per_tp_missing[tp] = miss
-        if not count_ok:
-            checks["timepoints"] = {"status": "fail",
-                                    "message": f"Found {n} timepoint(s) {sorted(timepoints)}, "
-                                               f"expected {exp_tp}."}
-        elif per_tp_missing:
-            checks["timepoints"] = {"status": "fail",
-                                    "message": f"Timepoint(s) missing modalities: {per_tp_missing}."}
-        else:
-            checks["timepoints"] = {"status": "pass",
-                                    "message": f"{n} timepoint(s) present, each complete: "
-                                               f"{sorted(timepoints)}."}
-
-    return {
-        "status": _worst([c["status"] for c in checks.values()]),
-        "checks": checks,
-        "reasons": _reasons(checks),
-        "present_modalities": sorted(present_modalities),
-        "present_masks": sorted(present_masks),
-        "timepoints": sorted(timepoints),
-        "missing_modalities": missing_mod,
-        "missing_masks": missing_mask,
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -580,101 +363,7 @@ def check_features(features: dict, thresholds: Optional[dict] = None) -> dict:
         checks["centroid"] = {"status": "pass",
                               "message": f"Centroid offset {off} {features.get('centroid_units')}."}
 
-    return {"status": _worst([c["status"] for c in checks.values()]),
-            "checks": checks, "reasons": _reasons(checks)}
-
-
-def _reasons(checks: dict) -> List[str]:
-    """List the checks that did NOT pass, as short 'name: message' strings.
-
-    Lets a caller (or a CSV column) see *which* checks fired without scanning
-    every per-check field. A passing result yields an empty list.
-    """
-    out = []
-    for name, info in checks.items():
-        if info.get("status") != "pass":
-            out.append(f"{name} [{info.get('status')}]: {info.get('message')}")
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Mask / label QC (different checks than images; no intensity statistics)
-# --------------------------------------------------------------------------- #
-def check_mask(
-    mask_path: str,
-    reference_image_path: Optional[str] = None,
-    thresholds: Optional[dict] = None,
-) -> dict:
-    """QC for a mask or label volume (brain mask, lesion mask, segmentation).
-
-    Masks are NOT images: computing 'intensity mean' on a binary label is
-    meaningless (it would be ~1). So a mask gets its own checks:
-
-    * non-empty: at least some non-zero voxels (an all-zero mask is a failure).
-    * label-like values: values are integer-like (a mask should not be a
-      continuous-intensity image mislabelled as a mask).
-    * grid match (if a reference image is given): the mask shares the image's
-      shape, so it can actually overlay it.
-
-    Returns the usual {status, checks, reasons} plus a small 'mask_stats' dict
-    (non-zero voxel count and fraction, number of distinct labels).
-    """
-    t = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
-    checks: Dict[str, dict] = {}
-    stats: Dict[str, object] = {}
-    try:
-        data = np.asarray(load_nifti(mask_path), dtype=np.float32)
-        if data.ndim > 3:
-            data = data[..., 0]
-    except Exception as exc:
-        return {"status": "fail",
-                "checks": {"readable": {"status": "fail",
-                                        "message": f"Could not load mask: {exc!r}"}},
-                "reasons": [f"readable [fail]: {exc!r}"], "mask_stats": {}}
-
-    nonzero = int(np.count_nonzero(data))
-    total = int(data.size)
-    stats["nonzero_voxels"] = nonzero
-    stats["nonzero_fraction"] = round(nonzero / total, 6) if total else None
-    distinct = np.unique(data[data != 0])
-    stats["n_labels"] = int(distinct.size)
-
-    # Non-empty.
-    if nonzero == 0:
-        checks["non_empty"] = {"status": "fail", "message": "Mask is entirely zero (empty)."}
-    else:
-        checks["non_empty"] = {"status": "pass",
-                               "message": f"{nonzero} non-zero voxels "
-                                          f"({stats['nonzero_fraction']:.4f} of volume)."}
-
-    # Label-like (values are (near-)integers).
-    if distinct.size > 0:
-        non_integer = np.any(np.abs(distinct - np.round(distinct)) > 1e-4)
-        if non_integer:
-            checks["label_values"] = {"status": "warning",
-                                      "message": "Mask has non-integer values; is this "
-                                                 "actually an intensity image, not a mask?"}
-        else:
-            checks["label_values"] = {"status": "pass",
-                                      "message": f"{distinct.size} integer label value(s)."}
-
-    # Grid match against a reference image, if given.
-    if reference_image_path:
-        try:
-            ref_shape = tuple(int(s) for s in nibabel.load(reference_image_path).shape[:3])
-            if tuple(data.shape[:3]) == ref_shape:
-                checks["grid_match"] = {"status": "pass",
-                                        "message": f"Mask matches image grid {ref_shape}."}
-            else:
-                checks["grid_match"] = {"status": "fail",
-                                        "message": f"Mask shape {tuple(data.shape[:3])} != "
-                                                   f"image shape {ref_shape}; will not overlay."}
-        except Exception as exc:
-            checks["grid_match"] = {"status": "warning",
-                                    "message": f"Could not compare to image grid: {exc!r}"}
-
-    return {"status": _worst([c["status"] for c in checks.values()]),
-            "checks": checks, "reasons": _reasons(checks), "mask_stats": stats}
+    return {"status": _worst([c["status"] for c in checks.values()]), "checks": checks}
 
 
 # --------------------------------------------------------------------------- #
@@ -683,34 +372,22 @@ def check_mask(
 def run_qc(
     image_path: str,
     brain_mask_path: Optional[str] = None,
-    lesion_mask_path: Optional[str] = None,
     thresholds: Optional[dict] = None,
 ) -> dict:
-    """Full per-sample QC for one image, with optional brain and lesion masks.
+    """Full per-sample metadata + feature QC for one image.
 
-    Each input is QC'd with the checks appropriate to its role:
-
-    * ``image_path``       -> metadata (header) QC + image-feature QC. If a
-      brain mask is given, intensity statistics are restricted to it.
-    * ``brain_mask_path``  -> mask QC (non-empty, label-like, grid-matches image).
-      Optional; pass it both to restrict image stats AND to QC the mask itself.
-    * ``lesion_mask_path`` -> mask QC (same checks). Optional. A lesion mask is
-      not treated as an image, so no intensity stats.
-
-    Returns one combined dict::
+    Loads the image (and brain mask, if given), runs header QC and image-feature
+    QC, and returns one combined dict:
 
         {
           "image": <path>,
-          "status": "pass"/"warning"/"fail",   # worst across everything run
-          "reasons": [ ... ],                   # which checks fired, plainly
-          "metadata_qc": {...},
-          "feature_qc":  {...},
-          "features":    {...},
-          "brain_mask_qc":  {...} or None,
-          "lesion_mask_qc": {...} or None,
+          "metadata_qc": {...},     # from check_metadata
+          "feature_qc":  {...},     # from check_features
+          "features":    {...},     # raw numbers from compute_features
+          "status": "pass"/"warning"/"fail",   # worst of the two QC layers
         }
 
-    Reads only the header for metadata QC; reads voxels for the rest.
+    Reads only the header for metadata QC; reads voxels for feature QC.
     """
     meta_qc = check_metadata(image_path, thresholds)
 
@@ -727,41 +404,15 @@ def run_qc(
     except Exception as exc:
         feature_qc = {"status": "fail",
                       "checks": {"load": {"status": "fail",
-                                          "message": f"Feature QC failed: {exc!r}"}},
-                      "reasons": [f"load [fail]: {exc!r}"]}
+                                          "message": f"Feature QC failed: {exc!r}"}}}
 
-    # Optional mask QC (different checks; never intensity stats).
-    brain_mask_qc = (check_mask(brain_mask_path, image_path, thresholds)
-                     if brain_mask_path else None)
-    lesion_mask_qc = (check_mask(lesion_mask_path, image_path, thresholds)
-                      if lesion_mask_path else None)
-
-    layers = {
-        "metadata": meta_qc,
-        "feature": feature_qc,
-        "brain_mask": brain_mask_qc,
-        "lesion_mask": lesion_mask_qc,
-    }
-    statuses = [v.get("status", "fail") for v in layers.values() if v]
-    overall = _worst(statuses)
-
-    # Aggregate reasons across every layer, prefixed by layer so it's clear
-    # WHICH part flagged (this is what makes a 'warning' self-explanatory).
-    reasons: List[str] = []
-    for layer_name, v in layers.items():
-        if v:
-            for r in v.get("reasons", []):
-                reasons.append(f"{layer_name}.{r}")
-
+    overall = _worst([meta_qc.get("status", "fail"), feature_qc.get("status", "fail")])
     return {
         "image": image_path,
-        "status": overall,
-        "reasons": reasons,
         "metadata_qc": meta_qc,
         "feature_qc": feature_qc,
         "features": features,
-        "brain_mask_qc": brain_mask_qc,
-        "lesion_mask_qc": lesion_mask_qc,
+        "status": overall,
     }
 
 
@@ -796,24 +447,17 @@ def main():
         description="ClinMRI-QC: per-sample metadata + image-feature QC")
     parser.add_argument("--image", required=True, help="Path to a NIfTI image")
     parser.add_argument("--brain_mask", default=None,
-                        help="Optional brain mask NIfTI (enables mask-restricted stats + mask QC)")
-    parser.add_argument("--lesion_mask", default=None,
-                        help="Optional lesion/label mask NIfTI (gets mask QC, not image QC)")
+                        help="Optional brain mask NIfTI (enables mask-restricted stats)")
     parser.add_argument("--min_foreground_fraction", type=float, default=None,
                         help="Override: flag fail below this foreground fraction")
-    parser.add_argument("--max_centroid_offset_mm", type=float, default=None,
-                        help="Override: warn above this centroid offset (mm)")
     parser.add_argument("--outfile", default=None, help="Optional path to save JSON")
     args = parser.parse_args()
 
     thresholds = {}
     if args.min_foreground_fraction is not None:
         thresholds["min_foreground_fraction"] = args.min_foreground_fraction
-    if args.max_centroid_offset_mm is not None:
-        thresholds["max_centroid_offset_mm"] = args.max_centroid_offset_mm
 
-    result = run_qc(args.image, brain_mask_path=args.brain_mask,
-                    lesion_mask_path=args.lesion_mask, thresholds=thresholds)
+    result = run_qc(args.image, brain_mask_path=args.brain_mask, thresholds=thresholds)
     output = json.dumps(result, indent=2)
     print(output)
     if args.outfile:
